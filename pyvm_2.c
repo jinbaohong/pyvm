@@ -24,6 +24,15 @@
 #define GREATER 4
 #define GREATER_EQUAL 5
 
+/* loop stack entry
+ * POP_BLOCK will remove an entry from loop_stack
+ */
+struct Block {
+	unsigned char _type;
+	char *_target;
+	int _level;
+};
+
 struct name_ent {
 	char *key;
 	int val;
@@ -50,6 +59,7 @@ struct codeObject {
 };
 
 static int top = -1;
+static int loop_stack_top = -1;
 
 int getInt(char *src);
 void get_code_object(struct codeObject *cobj, char *memptr);
@@ -57,7 +67,13 @@ void interpret(struct codeObject *cobj);
 void stack_push(int val, int *stk);
 int* stack_init(int stksz);
 int stack_pop(int *stk);
+int stack_size(int *stk);
+struct Block **loop_stack_init(int stksz);
+void loop_stack_push(struct Block *val, struct Block **stk);
+struct Block *loop_stack_pop(struct Block **stk);
 int getArg(char *ptr);
+
+
 
 int main(int ac, char const *av[])
 {
@@ -123,8 +139,10 @@ void interpret(struct codeObject *cobj)
 	char *pc;
 	struct name_ent *_names;
 	unsigned char opcode;
+	struct Block **_loop_stack, *loop_block;
 
 	_stack = stack_init(STACK_SIZ);
+	_loop_stack = loop_stack_init(STACK_SIZ);
 	_consts = cobj->consts;
 	_names = cobj->names;
 	pc = cobj->bytecodes;
@@ -175,12 +193,33 @@ void interpret(struct codeObject *cobj)
 				printf("\n");
 				#endif
 				break;
+			case BREAK_LOOP:
+				#if defined BSTR
+				printf("%3ld PRINT_NEWLINE\n", pc-1-cobj->bytecodes);
+				#endif
+				#if defined RUN
+				loop_block = loop_stack_pop(_loop_stack);
+				while (stack_size(_stack) > loop_block->_level)
+					stack_pop(_stack);
+				pc = loop_block->_target;
+				#endif
+				break;
 			case RETURN_VALUE:
 				#if defined BSTR
 				printf("%3ld RETURN_VALUE\n", pc-1-cobj->bytecodes);
 				#endif
 				#if defined RUN
 				stack_pop(_stack);
+				#endif
+				break;
+			case POP_BLOCK:
+				#if defined BSTR
+				printf("%3ld POP_BLOCK\n", pc-1-cobj->bytecodes);
+				#endif
+				#if defined RUN
+				loop_block = loop_stack_pop(_loop_stack);
+				while (stack_size(_stack) > loop_block->_level)
+					stack_pop(_stack);
 				#endif
 				break;
 			case STORE_NAME:
@@ -244,6 +283,14 @@ void interpret(struct codeObject *cobj)
 				pc += arg;
 				#endif
 				break;
+			case JUMP_ABSOLUTE:
+				#if defined BSTR
+				printf("%3ld %-25s %d\n", pc-3-cobj->bytecodes, "JUMP_FORWARD", arg);
+				#endif
+				#if defined RUN
+				pc = cobj->bytecodes + arg;
+				#endif
+				break;
 			case POP_JUMP_IF_FALSE:
 				#if defined BSTR
 				printf("%3ld %-25s %d\n", pc-3-cobj->bytecodes, "POP_JUMP_IF_FALSE", arg);
@@ -252,6 +299,19 @@ void interpret(struct codeObject *cobj)
 				opd_1 = stack_pop(_stack);
 				if (opd_1 == 0)
 					pc = cobj->bytecodes + arg;
+				#endif
+				break;
+			case SETUP_LOOP:
+				#if defined BSTR
+				printf("%3ld %-25s %d(%ld)\n", pc-3-cobj->bytecodes, "SETUP_LOOP", arg, pc-cobj->bytecodes+arg);
+				#endif
+				#if defined RUN
+				// _target is the address which BREAK_LOOP can use without dereference.
+				loop_block = malloc(sizeof(struct Block));
+				loop_block->_type = opcode;
+				loop_block->_target = pc + arg;
+				loop_block->_level = stack_size(_stack);
+				loop_stack_push(loop_block, _loop_stack);
 				#endif
 				break;
 			default:
@@ -272,6 +332,7 @@ int getArg(char *ptr)
 	return b1 | b2;
 }
 
+/* int stack operation */
 int* stack_init(int stksz)
 {
 	int *stk = calloc(sizeof(int), stksz);
@@ -294,6 +355,37 @@ int stack_pop(int *stk)
 	}
 	return stk[top--];
 }
+
+int stack_size(int *stk)
+{
+	return top + 1;
+}
+
+/* loop_block stack operation */
+struct Block **loop_stack_init(int stksz)
+{
+	struct Block **stk = malloc(sizeof(struct Block *) * stksz);
+}
+
+void loop_stack_push(struct Block *val, struct Block **stk)
+{
+	if (loop_stack_top == STACK_SIZ-1){
+		printf("Loop_Stack is full\n");
+		exit(2);
+	}
+	stk[++loop_stack_top] = val;
+}
+
+struct Block *loop_stack_pop(struct Block **stk)
+{
+	if (loop_stack_top == -1){
+		printf("Loop_Stack is empty\n");
+		exit(2);
+	}
+	return stk[loop_stack_top--];
+}
+
+
 
 void get_code_object(struct codeObject *cobj, char *memptr)
 {
