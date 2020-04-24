@@ -1,11 +1,11 @@
-i = 0
-while i < 10:
-	while i < 5:
-		print i
-		i = i + 1
-		if i > 3:
-			break
-	break
+a = 1
+
+def foo(arg, ag2, ag3):
+	b = 2
+	c = b + 3
+	d = arg + 1
+	return "hello"
+foo(a, 0)
 # a = 1
 # b = a + 1
 # iris = b * 2
