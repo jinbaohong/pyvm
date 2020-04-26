@@ -1,121 +1,100 @@
-#include <sys/mman.h>
-#include <stdio.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <time.h>
-#include <stdlib.h>
-#include <string.h>
-#define ARRSIZ 256
-#define STACK_SIZ 256
-#define MAP_SIZ 256
-
+#include "pyvm.h"
+/* OP CODE */
+#include "opcode.h"
 /* RUN:  execute bytecodes
  * BSTR: generate literal bytecodes
  */
 #define RUN
 // #define BSTR
 
-/* OP CODE */
-#include "opcode.h"
-
-/* COMPARE_OP */
-#define LESS 0
-#define LESS_EQUAL 1
-#define EQUAL 2
-#define NOT_EQUAL 3
-#define GREATER 4
-#define GREATER_EQUAL 5
-
-
-struct map_ent {
-	struct const_ent *key;
-	struct const_ent *val;
-};
-
-struct Map {
-	int size;
-	struct map_ent **array;
-};
-
-
-struct stack {
-	int top;
-	struct const_ent **array;
-};
-
-/* loop stack entry
- * POP_BLOCK will remove an entry from loop_stack
- */
-struct Block {
-	unsigned char _type;
-	char *_target;
-	int _level;
-};
-
-struct name_ent {
-	char *key;
-	struct const_ent *val;
-};
-
-struct varname_ent {
-	char *key;
-	int val;
-};
-
-struct const_ent {
-	/* type:
-	 * i = int
-	 * t = string
-	 * c = codeObject
-	 */
-	char _type;
-	void *_ptr;
-};
-
-struct codeObject {
-	int argcnt;
-	int nlocals;
-	int stacksize;
-	int flag;
-	int byte_code_size;
-	char *bytecodes;
-	int consts_sz;
-	/* constant is not always integer(i).
-	 * It may be string(t), codeObject(c)
-	 * or something else type. So I use
-	 * struct const_ent pointer as the
-	 * entry of consts.
-	 */
-	struct const_ent *consts[ARRSIZ];
-	int names_sz;
-	struct const_ent *names[ARRSIZ];
-	int varnames_sz;
-	struct varname_ent varnames[ARRSIZ];
-	char *freevars[ARRSIZ];
-	char *cellvars[ARRSIZ];
-	char *file_name;
-	char *co_name;
-	int lineno;
-	char *notable;
-};
-
 static char *orig_ptr; // orig_ptr is an anchor of codeObject starting point
 static char *_string_table[ARRSIZ];
 static int _string_table_top = 0;
 
-int getInt(char *src);
-char *get_code_object(struct codeObject *cobj, char *memptr);
-void interpret(struct codeObject *cobj);
-int getArg(char *ptr);
-struct stack *stack_init(int stksz);
-void stack_push(struct const_ent *obg, struct stack *stk);
-struct const_ent *stack_pop(struct stack *stk);
-int stack_size(struct stack *stk);
-struct Map *map_init(int mapsz);
-int map_exist(struct const_ent *key, struct Map *map);
-int map_put(struct const_ent *key, struct const_ent *val, struct Map *map);
-struct const_ent *map_get(struct const_ent *key, struct Map *map);
 
+/* functionObject's API */
+
+struct functionObject *func_init_by_codeObj(struct codeObject *cobj)
+{
+	struct functionObject *funcObj;
+
+	funcObj = malloc(sizeof(struct functionObject));
+	funcObj->_func_code = cobj;
+	funcObj->_func_name = cobj->co_name;
+	funcObj->_flags = cobj->flag;
+
+	return funcObj;
+}
+
+/* frameObject's API */
+struct frameObject {
+	struct Map *_locals;
+	struct stack *_stack;
+	struct stack *_loop_stack;
+	struct const_ent **_consts;
+	struct const_ent **_names;
+	struct codeObject *_cobj;
+	char *_pc;
+
+	struct frameObject *_last;
+};
+
+struct frameObject *frame_init_by_codeObj(struct codeObject *cobj)
+{
+	struct frameObject *fobj;
+
+	fobj = malloc(sizeof(struct frameObject));
+	fobj->_locals = map_init(MAP_SIZ);
+	fobj->_stack = stack_init(STACK_SIZ);
+	fobj->_loop_stack = stack_init(STACK_SIZ);
+	fobj->_consts = cobj->consts;
+	fobj->_names = cobj->names;
+	fobj->_cobj = cobj;
+	fobj->_pc = cobj->bytecodes;
+
+	return fobj;
+}
+
+struct frameObject *frame_init_by_funcObj(struct functionObject *funobj)
+{
+	struct frameObject *frmobj;
+
+	frmobj = malloc(sizeof(struct frameObject));
+	frmobj->_locals = map_init(MAP_SIZ);
+	frmobj->_stack = stack_init(STACK_SIZ);
+	frmobj->_loop_stack = stack_init(STACK_SIZ);
+	frmobj->_consts = funobj->_func_code->consts;
+	frmobj->_names = funobj->_func_code->names;
+	frmobj->_cobj = funobj->_func_code;
+	frmobj->_pc = funobj->_func_code->bytecodes;
+
+	return frmobj;
+}
+
+unsigned char frame_get_opcode(struct frameObject *frObj)
+/* Side effect: This will change actual _pc in frObj */
+{
+	unsigned char opcode;
+
+	opcode = *(frObj->_pc)++;
+	return opcode;
+}
+
+int frame_has_more_code(struct frameObject *frObj)
+{
+	return frObj->_pc < (frObj->_cobj->bytecodes + frObj->_cobj->byte_code_size) ? 1 : 0;
+}
+
+int frame_get_op_arg(struct frameObject *frObj)
+/* Side effect: This will change actual _pc in frObj */
+{
+	int b1, b2;
+
+	b1 = *(frObj->_pc)++ & 0xFF;
+	b2 = (*(frObj->_pc)++ & 0xFF) << 8;
+
+	return b1 | b2;
+}
 
 int main(int ac, char const *av[])
 {
@@ -197,78 +176,79 @@ int main(int ac, char const *av[])
 
 void interpret(struct codeObject *cobj)
 {
-	int arg;
-	char *pc;
-	unsigned char opcode;
-	struct stack *_stack, *_loop_stack;
+	struct frameObject *frame_now, *frame_tmp;
 	struct Block *loop_block;
-	struct const_ent **_consts, **_names, *opd_1, *opd_2, *opd_res;
-	struct Map *_globals;
+	struct const_ent *opd_1, *opd_2, *opd_res;
+	unsigned char opcode;
+	int arg;
 
-	_globals = map_init(MAP_SIZ);
-	_stack = stack_init(STACK_SIZ);
-	_loop_stack = stack_init(STACK_SIZ);
-	_consts = cobj->consts;
-	_names = cobj->names;
-	pc = cobj->bytecodes;
+	frame_now = frame_init_by_codeObj(cobj);
+	frame_now->_last = NULL;
 
-	while ( pc < (cobj->bytecodes + cobj->byte_code_size) ) {
-		opcode = *pc++;
+	// _frame = frame_now;
 
-		if ( opcode >= HAVE_ARGUMENT ) {
-			arg = getArg(pc);
-			pc += 2;
-		}
+	while ( frame_has_more_code(frame_now) ) {
+		opcode = frame_get_opcode(frame_now);
+
+		if ( opcode >= HAVE_ARGUMENT )
+			arg = frame_get_op_arg(frame_now);
 
 		switch (opcode) {
 			case POP_TOP:
 				#if defined BSTR
-				printf("%3ld POP_TOP\n", pc-1-cobj->bytecodes);
+				printf("%3ld POP_TOP\n", frame_now->_pc - 1 - frame_now->_cobj->bytecodes);
 				#endif
 				#if defined RUN
-				stack_pop(_stack);
+				stack_pop(frame_now->_stack);
 				#endif
 				break;
 			case BINARY_MULTIPLY:
 				#if defined BSTR
-				printf("%3ld BINARY_MULTIPLY\n", pc-1-cobj->bytecodes);
+				printf("%3ld BINARY_MULTIPLY\n", frame_now->_pc - 1 - frame_now->_cobj->bytecodes);
 				#endif
 				#if defined RUN
-				opd_1 = stack_pop(_stack);
-				opd_2 = stack_pop(_stack);
+				opd_1 = stack_pop(frame_now->_stack);
+				opd_2 = stack_pop(frame_now->_stack);
 				opd_res = malloc(sizeof(struct const_ent));
 				opd_res->_type = 'i';
 				opd_res->_ptr = malloc(sizeof(int));
 				*((int*)(opd_res->_ptr)) = *((int*)(opd_1->_ptr)) * *((int*)(opd_2->_ptr));
-				stack_push(opd_res, _stack);
+				stack_push(opd_res, frame_now->_stack);
 				#endif
 				break;
 			case BINARY_ADD:
 				#if defined BSTR
-				printf("%3ld BINARY_ADD\n", pc-1-cobj->bytecodes);
+				printf("%3ld BINARY_ADD\n", frame_now->_pc - 1 - frame_now->_cobj->bytecodes);
 				#endif
 				#if defined RUN
-				opd_1 = stack_pop(_stack);
-				opd_2 = stack_pop(_stack);
+				opd_1 = stack_pop(frame_now->_stack);
+				opd_2 = stack_pop(frame_now->_stack);
 				opd_res = malloc(sizeof(struct const_ent));
 				opd_res->_type = 'i';
 				opd_res->_ptr = malloc(sizeof(int));
 				*((int*)(opd_res->_ptr)) = *((int*)(opd_1->_ptr)) + *((int*)(opd_2->_ptr));
-				stack_push(opd_res, _stack);
+				stack_push(opd_res, frame_now->_stack);
 				#endif
 				break;
 			case PRINT_ITEM:
 				#if defined BSTR
-				printf("%3ld PRINT_ITEM\n", pc-1-cobj->bytecodes);
+				printf("%3ld PRINT_ITEM\n", frame_now->_pc - 1 - frame_now->_cobj->bytecodes);
 				#endif
 				#if defined RUN
-				opd_1 = stack_pop(_stack);
-				printf("%d", *(int*)(opd_1->_ptr));
+				opd_1 = stack_pop(frame_now->_stack);
+				// printf("%c\n", opd_1->_type);
+				switch (opd_1->_type) {
+					case 'i':
+						printf("%d", *(int*)(opd_1->_ptr));
+						break;
+					case 't':
+						printf("%s", (char*)opd_1->_ptr);
+				}
 				#endif
 				break;
 			case PRINT_NEWLINE:
 				#if defined BSTR
-				printf("%3ld PRINT_NEWLINE\n\n", pc-1-cobj->bytecodes);
+				printf("%3ld PRINT_NEWLINE\n\n", frame_now->_pc - 1 - frame_now->_cobj->bytecodes);
 				#endif
 				#if defined RUN
 				printf("\n");
@@ -276,85 +256,93 @@ void interpret(struct codeObject *cobj)
 				break;
 			case BREAK_LOOP:
 				#if defined BSTR
-				printf("%3ld PRINT_NEWLINE\n", pc-1-cobj->bytecodes);
+				printf("%3ld PRINT_NEWLINE\n", frame_now->_pc - 1 - frame_now->_cobj->bytecodes);
 				#endif
 				#if defined RUN
-				loop_block = stack_pop(_loop_stack)->_ptr;
-				while (stack_size(_stack) > loop_block->_level)
-					stack_pop(_stack);
-				pc = loop_block->_target;
+				loop_block = stack_pop(frame_now->_loop_stack)->_ptr;
+				while (stack_size(frame_now->_stack) > loop_block->_level)
+					stack_pop(frame_now->_stack);
+				frame_now->_pc = loop_block->_target;
 				#endif
 				break;
 			case RETURN_VALUE:
 				#if defined BSTR
-				printf("%3ld RETURN_VALUE\n", pc-1-cobj->bytecodes);
+				printf("%3ld RETURN_VALUE\n", frame_now->_pc - 1 - frame_now->_cobj->bytecodes);
 				#endif
 				#if defined RUN
-				stack_pop(_stack);
+				opd_res = stack_pop(frame_now->_stack);
+				if (frame_now->_last == NULL)
+					return;
+				frame_tmp = frame_now;
+
+				/* Please free() frame_tmp here */
+
+				frame_now = frame_now->_last;
+				stack_push(opd_res, frame_now->_stack);
 				#endif
 				break;
 			case POP_BLOCK:
 				#if defined BSTR
-				printf("%3ld POP_BLOCK\n", pc-1-cobj->bytecodes);
+				printf("%3ld POP_BLOCK\n", frame_now->_pc - 1 - frame_now->_cobj->bytecodes);
 				#endif
 				#if defined RUN
-				loop_block = stack_pop(_loop_stack)->_ptr;
-				while (stack_size(_stack) > loop_block->_level)
-					stack_pop(_stack);
+				loop_block = stack_pop(frame_now->_loop_stack)->_ptr;
+				while (stack_size(frame_now->_stack) > loop_block->_level)
+					stack_pop(frame_now->_stack);
 				#endif
 				break;
 			case STORE_NAME:
 				#if defined BSTR
-				printf("%3ld %-25s %d (%s)\n\n", pc-3-cobj->bytecodes, "STORE_NAME", arg, (char*)_names[arg]->_ptr);
+				printf("%3ld %-25s %d (%s)\n\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "STORE_NAME", arg, (char*)frame_now->_names[arg]->_ptr);
 				#endif
 				#if defined RUN
 				opd_res = malloc(sizeof(struct const_ent));
 				opd_res->_type = 's';
-				opd_res->_ptr = calloc(strlen((char*)_names[arg]->_ptr)+1, 1);
-				strcpy(opd_res->_ptr, _names[arg]->_ptr);
-				map_put(opd_res, stack_pop(_stack), _globals);
+				opd_res->_ptr = calloc(strlen((char*)frame_now->_names[arg]->_ptr)+1, 1);
+				strcpy(opd_res->_ptr, frame_now->_names[arg]->_ptr);
+				map_put(opd_res, stack_pop(frame_now->_stack), frame_now->_locals);
 				#endif
 				break;
 			case LOAD_CONST:
 				#if defined BSTR
-				switch (_consts[arg]->_type) {
+				switch (frame_now->_consts[arg]->_type) {
 					case 'i':
-						printf("%3ld %-25s %d (%d)\n", pc-3-cobj->bytecodes, "LOAD_CONST", arg, *((int*)(_consts[arg]->_ptr)));
+						printf("%3ld %-25s %d (%d)\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "LOAD_CONST", arg, *(int*)frame_now->_consts[arg]->_ptr);
 						break;
 					case 't':
-						printf("%3ld %-25s %d (%s)\n", pc-3-cobj->bytecodes, "LOAD_CONST", arg, (char*)(_consts[arg]->_ptr));
+						printf("%3ld %-25s %d (%s)\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "LOAD_CONST", arg, (char*)frame_now->_consts[arg]->_ptr);
 						break;
 					case 'N':
-						printf("%3ld %-25s %d (None)\n", pc-3-cobj->bytecodes, "LOAD_CONST", arg);
+						printf("%3ld %-25s %d (None)\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "LOAD_CONST", arg);
 						break;
 					case 'c':
-						printf("%3ld %-25s %d (<code object %s, line %d>)\n", pc-3-cobj->bytecodes, "LOAD_CONST", arg, ((struct codeObject*)(_consts[arg]->_ptr))->co_name, ((struct codeObject*)(_consts[arg]->_ptr))->lineno);
+						printf("%3ld %-25s %d (<code object %s, line %d>)\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "LOAD_CONST", arg, ((struct codeObject*)(frame_now->_consts[arg]->_ptr))->co_name, ((struct codeObject*)(frame_now->_consts[arg]->_ptr))->lineno);
 						break;
 					default:
-						printf("Error: doesn't recognize consts type: %c\n", _consts[arg]->_type);
+						printf("Error: doesn't recognize consts type: %c\n", frame_now->_consts[arg]->_type);
 						exit(2);
 						break;
 				}
 				#endif
 				#if defined RUN
-				stack_push(_consts[arg], _stack);
+				stack_push(frame_now->_consts[arg], frame_now->_stack);
 				#endif
 				break;
 			case LOAD_NAME:
 				#if defined BSTR
-				printf("%3ld %-25s %d (%s)\n", pc-3-cobj->bytecodes, "LOAD_NAME", arg, (char*)_names[arg]->_ptr);
+				printf("%3ld %-25s %d (%s)\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "LOAD_NAME", arg, (char*)frame_now->_names[arg]->_ptr);
 				#endif
 				#if defined RUN
-				stack_push(map_get(_names[arg], _globals), _stack);
+				stack_push(map_get(frame_now->_names[arg], frame_now->_locals), frame_now->_stack);
 				#endif
 				break;
 			case COMPARE_OP:
 				#if defined BSTR
-				printf("%3ld %-25s %d (.)\n", pc-3-cobj->bytecodes, "COMPARE_OP", arg);
+				printf("%3ld %-25s %d (.)\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "COMPARE_OP", arg);
 				#endif
 				#if defined RUN
-				opd_1 = stack_pop(_stack);
-				opd_2 = stack_pop(_stack);
+				opd_1 = stack_pop(frame_now->_stack);
+				opd_2 = stack_pop(frame_now->_stack);
 
 				opd_res = malloc(sizeof(struct const_ent));
 				opd_res->_type = 'i';
@@ -379,82 +367,79 @@ void interpret(struct codeObject *cobj)
 						*((int*)(opd_res->_ptr)) = *(int*)(opd_2->_ptr) >= *(int*)(opd_1->_ptr) ? 1 : 0;
 						break;
 				}
-				stack_push(opd_res, _stack);
+				stack_push(opd_res, frame_now->_stack);
 				#endif
 				break;
 			case JUMP_FORWARD:
 				#if defined BSTR
-				printf("%3ld %-25s %d (%ld)\n", pc-3-cobj->bytecodes, "JUMP_FORWARD", arg, pc-cobj->bytecodes+arg);
+				printf("%3ld %-25s %d (%ld)\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "JUMP_FORWARD", arg, frame_now->_pc - frame_now->_cobj->bytecodes + arg);
 				#endif
 				#if defined RUN
-				pc += arg;
+				frame_now->_pc += arg;
 				#endif
 				break;
 			case JUMP_ABSOLUTE:
 				#if defined BSTR
-				printf("%3ld %-25s %d\n", pc-3-cobj->bytecodes, "JUMP_FORWARD", arg);
+				printf("%3ld %-25s %d\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "JUMP_FORWARD", arg);
 				#endif
 				#if defined RUN
-				pc = cobj->bytecodes + arg;
+				frame_now->_pc = frame_now->_cobj->bytecodes + arg;
 				#endif
 				break;
 			case POP_JUMP_IF_FALSE:
 				#if defined BSTR
-				printf("%3ld %-25s %d\n\n", pc-3-cobj->bytecodes, "POP_JUMP_IF_FALSE", arg);
+				printf("%3ld %-25s %d\n\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "POP_JUMP_IF_FALSE", arg);
 				#endif
 				#if defined RUN
-				opd_1 = stack_pop(_stack);
+				opd_1 = stack_pop(frame_now->_stack);
 				if (*(int*)(opd_1->_ptr) == 0)
-					pc = cobj->bytecodes + arg;
+					frame_now->_pc = frame_now->_cobj->bytecodes + arg;
 				#endif
 				break;
 			case SETUP_LOOP:
 				#if defined BSTR
-				printf("%3ld %-25s %d (to %ld)\n", pc-3-cobj->bytecodes, "SETUP_LOOP", arg, pc-cobj->bytecodes+arg);
+				printf("%3ld %-25s %d (to %ld)\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "SETUP_LOOP", arg, frame_now->_pc - frame_now->_cobj->bytecodes + arg);
 				#endif
 				#if defined RUN
 				// _target is the address which BREAK_LOOP can use without dereference.
 				loop_block = malloc(sizeof(struct Block));
 				loop_block->_type = opcode;
-				loop_block->_target = pc + arg;
-				loop_block->_level = stack_size(_stack);
+				loop_block->_target = frame_now->_pc + arg;
+				loop_block->_level = stack_size(frame_now->_stack);
 				opd_res = malloc(sizeof(struct const_ent));
 				opd_res->_type = 'B';
 				opd_res->_ptr = loop_block;
-				stack_push(opd_res, _loop_stack);
+				stack_push(opd_res, frame_now->_loop_stack);
 				#endif
 				break;
 			case CALL_FUNCTION:
 				#if defined BSTR
-				printf("%3ld %-25s %d\n", pc-3-cobj->bytecodes, "CALL_FUNCTION", arg);
+				printf("%3ld %-25s %d\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "CALL_FUNCTION", arg);
 				#endif
 				#if defined RUN
+				frame_tmp = frame_init_by_funcObj(stack_pop(frame_now->_stack)->_ptr);
+				frame_tmp->_last = frame_now;
+				frame_now = frame_tmp;
 				#endif
 				break;
 			case MAKE_FUNCTION:
 				#if defined BSTR
-				printf("%3ld %-25s %d\n", pc-3-cobj->bytecodes, "MAKE_FUNCTION", arg);
+				printf("%3ld %-25s %d\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "MAKE_FUNCTION", arg);
 				#endif
 				#if defined RUN
+				opd_res = malloc(sizeof(struct const_ent));
+				opd_res->_type = 'f'; // functionObject
+				opd_res->_ptr = (void*)func_init_by_codeObj(stack_pop(frame_now->_stack)->_ptr);
+				stack_push(opd_res, frame_now->_stack);
 				#endif
 				break;
 			default:
 				printf("Error: doesn't know opcode [%d]\n", opcode);
 				exit(2);
 		}
-
 	}
 }
-
-int getArg(char *ptr)
-{
-	int b1, b2;
-
-	b1 = *ptr++ & 0xFF;
-	b2 = (*ptr & 0xFF) << 8;
-
-	return b1 | b2;
-}
+		
 
 /* Generic stack */
 

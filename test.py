@@ -1,11 +1,13 @@
 a = 1
 
 def foo():
-	b = 2
-	c = b + 3
-	d = arg + 1
-	return "hello"
-foo()
+	return 3 + 3
+
+def bar():
+	return 4 + 5
+
+print foo()
+print bar()
 # a = 1
 # b = a + 1
 # iris = b * 2
