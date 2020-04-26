@@ -7,13 +7,12 @@
 #include <string.h>
 #define ARRSIZ 256
 #define STACK_SIZ 256
-#define MAP_SIZ 256
 
 /* RUN:  execute bytecodes
  * BSTR: generate literal bytecodes
  */
-#define RUN
-// #define BSTR
+#define BSTR
+
 
 /* OP CODE */
 #include "opcode.h"
@@ -26,23 +25,6 @@
 #define GREATER 4
 #define GREATER_EQUAL 5
 
-
-struct map_ent {
-	struct const_ent *key;
-	struct const_ent *val;
-};
-
-struct Map {
-	int size;
-	struct map_ent **array;
-};
-
-
-struct stack {
-	int top;
-	struct const_ent **array;
-};
-
 /* loop stack entry
  * POP_BLOCK will remove an entry from loop_stack
  */
@@ -54,7 +36,7 @@ struct Block {
 
 struct name_ent {
 	char *key;
-	struct const_ent *val;
+	int val;
 };
 
 struct varname_ent {
@@ -88,7 +70,7 @@ struct codeObject {
 	 */
 	struct const_ent *consts[ARRSIZ];
 	int names_sz;
-	struct const_ent *names[ARRSIZ];
+	struct name_ent names[ARRSIZ];
 	int varnames_sz;
 	struct varname_ent varnames[ARRSIZ];
 	char *freevars[ARRSIZ];
@@ -99,6 +81,8 @@ struct codeObject {
 	char *notable;
 };
 
+static int top = -1;
+static int loop_stack_top = -1;
 static char *orig_ptr; // orig_ptr is an anchor of codeObject starting point
 static char *_string_table[ARRSIZ];
 static int _string_table_top = 0;
@@ -106,15 +90,15 @@ static int _string_table_top = 0;
 int getInt(char *src);
 char *get_code_object(struct codeObject *cobj, char *memptr);
 void interpret(struct codeObject *cobj);
+void stack_push(int val, int *stk);
+int* stack_init(int stksz);
+int stack_pop(int *stk);
+int stack_size(int *stk);
+struct Block **loop_stack_init(int stksz);
+void loop_stack_push(struct Block *val, struct Block **stk);
+struct Block *loop_stack_pop(struct Block **stk);
 int getArg(char *ptr);
-struct stack *stack_init(int stksz);
-void stack_push(struct const_ent *obg, struct stack *stk);
-struct const_ent *stack_pop(struct stack *stk);
-int stack_size(struct stack *stk);
-struct Map *map_init(int mapsz);
-int map_exist(struct const_ent *key, struct Map *map);
-int map_put(struct const_ent *key, struct const_ent *val, struct Map *map);
-struct const_ent *map_get(struct const_ent *key, struct Map *map);
+
 
 
 int main(int ac, char const *av[])
@@ -185,7 +169,7 @@ int main(int ac, char const *av[])
 	}
 	printf("[cobj->names]\n");
 	for (int i = 0; i < cobj.names_sz; ++i)
-		printf("  cobj->names[%d] %s\n", i, (char*)cobj.names[i]->_ptr);
+		printf("  cobj->names[%d] %s\n", i, cobj.names[i].key);
 	printf("[cobj->filename] %s\n", cobj.file_name);
 	printf("[cobj->co_name] %s\n", cobj.co_name);
 	#endif
@@ -197,17 +181,15 @@ int main(int ac, char const *av[])
 
 void interpret(struct codeObject *cobj)
 {
-	int arg;
+	int *_stack, arg, opd_1, opd_2;
 	char *pc;
+	struct name_ent *_names;
 	unsigned char opcode;
-	struct stack *_stack, *_loop_stack;
-	struct Block *loop_block;
-	struct const_ent **_consts, **_names, *opd_1, *opd_2, *opd_res;
-	struct Map *_globals;
+	struct Block **_loop_stack, *loop_block;
+	struct const_ent **_consts;
 
-	_globals = map_init(MAP_SIZ);
 	_stack = stack_init(STACK_SIZ);
-	_loop_stack = stack_init(STACK_SIZ);
+	_loop_stack = loop_stack_init(STACK_SIZ);
 	_consts = cobj->consts;
 	_names = cobj->names;
 	pc = cobj->bytecodes;
@@ -223,10 +205,9 @@ void interpret(struct codeObject *cobj)
 		switch (opcode) {
 			case POP_TOP:
 				#if defined BSTR
-				printf("%3ld POP_TOP\n", pc-1-cobj->bytecodes);
+				printf("%3ld BINARY_MULTIPLY\n", pc-1-cobj->bytecodes);
 				#endif
 				#if defined RUN
-				stack_pop(_stack);
 				#endif
 				break;
 			case BINARY_MULTIPLY:
@@ -236,11 +217,7 @@ void interpret(struct codeObject *cobj)
 				#if defined RUN
 				opd_1 = stack_pop(_stack);
 				opd_2 = stack_pop(_stack);
-				opd_res = malloc(sizeof(struct const_ent));
-				opd_res->_type = 'i';
-				opd_res->_ptr = malloc(sizeof(int));
-				*((int*)(opd_res->_ptr)) = *((int*)(opd_1->_ptr)) * *((int*)(opd_2->_ptr));
-				stack_push(opd_res, _stack);
+				stack_push(opd_1 * opd_2, _stack);
 				#endif
 				break;
 			case BINARY_ADD:
@@ -250,11 +227,7 @@ void interpret(struct codeObject *cobj)
 				#if defined RUN
 				opd_1 = stack_pop(_stack);
 				opd_2 = stack_pop(_stack);
-				opd_res = malloc(sizeof(struct const_ent));
-				opd_res->_type = 'i';
-				opd_res->_ptr = malloc(sizeof(int));
-				*((int*)(opd_res->_ptr)) = *((int*)(opd_1->_ptr)) + *((int*)(opd_2->_ptr));
-				stack_push(opd_res, _stack);
+				stack_push(opd_1 + opd_2, _stack);
 				#endif
 				break;
 			case PRINT_ITEM:
@@ -263,12 +236,12 @@ void interpret(struct codeObject *cobj)
 				#endif
 				#if defined RUN
 				opd_1 = stack_pop(_stack);
-				printf("%d", *(int*)(opd_1->_ptr));
+				printf("%d", opd_1);
 				#endif
 				break;
 			case PRINT_NEWLINE:
 				#if defined BSTR
-				printf("%3ld PRINT_NEWLINE\n\n", pc-1-cobj->bytecodes);
+				printf("%3ld PRINT_NEWLINE\n", pc-1-cobj->bytecodes);
 				#endif
 				#if defined RUN
 				printf("\n");
@@ -279,7 +252,7 @@ void interpret(struct codeObject *cobj)
 				printf("%3ld PRINT_NEWLINE\n", pc-1-cobj->bytecodes);
 				#endif
 				#if defined RUN
-				loop_block = stack_pop(_loop_stack)->_ptr;
+				loop_block = loop_stack_pop(_loop_stack);
 				while (stack_size(_stack) > loop_block->_level)
 					stack_pop(_stack);
 				pc = loop_block->_target;
@@ -298,21 +271,17 @@ void interpret(struct codeObject *cobj)
 				printf("%3ld POP_BLOCK\n", pc-1-cobj->bytecodes);
 				#endif
 				#if defined RUN
-				loop_block = stack_pop(_loop_stack)->_ptr;
+				loop_block = loop_stack_pop(_loop_stack);
 				while (stack_size(_stack) > loop_block->_level)
 					stack_pop(_stack);
 				#endif
 				break;
 			case STORE_NAME:
 				#if defined BSTR
-				printf("%3ld %-25s %d (%s)\n\n", pc-3-cobj->bytecodes, "STORE_NAME", arg, (char*)_names[arg]->_ptr);
+				printf("%3ld %-25s %d (%s)\n", pc-3-cobj->bytecodes, "STORE_NAME", arg, _names[arg].key);
 				#endif
 				#if defined RUN
-				opd_res = malloc(sizeof(struct const_ent));
-				opd_res->_type = 's';
-				opd_res->_ptr = calloc(strlen((char*)_names[arg]->_ptr)+1, 1);
-				strcpy(opd_res->_ptr, _names[arg]->_ptr);
-				map_put(opd_res, stack_pop(_stack), _globals);
+				_names[arg].val = stack_pop(_stack);
 				#endif
 				break;
 			case LOAD_CONST:
@@ -342,44 +311,39 @@ void interpret(struct codeObject *cobj)
 				break;
 			case LOAD_NAME:
 				#if defined BSTR
-				printf("%3ld %-25s %d (%s)\n", pc-3-cobj->bytecodes, "LOAD_NAME", arg, (char*)_names[arg]->_ptr);
+				printf("%3ld %-25s %d (%s)\n", pc-3-cobj->bytecodes, "LOAD_NAME", arg, _names[arg].key);
 				#endif
 				#if defined RUN
-				stack_push(map_get(_names[arg], _globals), _stack);
+				stack_push(_names[arg].val, _stack);
 				#endif
 				break;
 			case COMPARE_OP:
 				#if defined BSTR
-				printf("%3ld %-25s %d (.)\n", pc-3-cobj->bytecodes, "COMPARE_OP", arg);
+				printf("%3ld %-25s %d (%d)\n", pc-3-cobj->bytecodes, "COMPARE_OP", arg, arg);
 				#endif
 				#if defined RUN
 				opd_1 = stack_pop(_stack);
 				opd_2 = stack_pop(_stack);
-
-				opd_res = malloc(sizeof(struct const_ent));
-				opd_res->_type = 'i';
-				opd_res->_ptr = (void*)malloc(sizeof(int));
 				switch (arg) {
 					case LESS:
-						*((int*)(opd_res->_ptr)) = *(int*)(opd_2->_ptr) < *(int*)(opd_1->_ptr) ? 1 : 0;
+						stack_push(opd_2 < opd_1 ? 1 : 0, _stack);
 						break;
 					case LESS_EQUAL:
-						*((int*)(opd_res->_ptr)) = *(int*)(opd_2->_ptr) <= *(int*)(opd_1->_ptr) ? 1 : 0;
+						stack_push(opd_2 <= opd_1 ? 1 : 0, _stack);
 						break;
 					case EQUAL:
-						*((int*)(opd_res->_ptr)) = *(int*)(opd_2->_ptr) == *(int*)(opd_1->_ptr) ? 1 : 0;
+						stack_push(opd_2 == opd_1 ? 1 : 0, _stack);
 						break;
 					case NOT_EQUAL:
-						*((int*)(opd_res->_ptr)) = *(int*)(opd_2->_ptr) != *(int*)(opd_1->_ptr) ? 1 : 0;
+						stack_push(opd_2 != opd_1 ? 1 : 0, _stack);
 						break;
 					case GREATER:
-						*((int*)(opd_res->_ptr)) = *(int*)(opd_2->_ptr) > *(int*)(opd_1->_ptr) ? 1 : 0;
+						stack_push(opd_2 > opd_1 ? 1 : 0, _stack);
 						break;
 					case GREATER_EQUAL:
-						*((int*)(opd_res->_ptr)) = *(int*)(opd_2->_ptr) >= *(int*)(opd_1->_ptr) ? 1 : 0;
+						stack_push(opd_2 >= opd_1 ? 1 : 0, _stack);
 						break;
 				}
-				stack_push(opd_res, _stack);
 				#endif
 				break;
 			case JUMP_FORWARD:
@@ -400,17 +364,17 @@ void interpret(struct codeObject *cobj)
 				break;
 			case POP_JUMP_IF_FALSE:
 				#if defined BSTR
-				printf("%3ld %-25s %d\n\n", pc-3-cobj->bytecodes, "POP_JUMP_IF_FALSE", arg);
+				printf("%3ld %-25s %d\n", pc-3-cobj->bytecodes, "POP_JUMP_IF_FALSE", arg);
 				#endif
 				#if defined RUN
 				opd_1 = stack_pop(_stack);
-				if (*(int*)(opd_1->_ptr) == 0)
+				if (opd_1 == 0)
 					pc = cobj->bytecodes + arg;
 				#endif
 				break;
 			case SETUP_LOOP:
 				#if defined BSTR
-				printf("%3ld %-25s %d (to %ld)\n", pc-3-cobj->bytecodes, "SETUP_LOOP", arg, pc-cobj->bytecodes+arg);
+				printf("%3ld %-25s %d (%ld)\n", pc-3-cobj->bytecodes, "SETUP_LOOP", arg, pc-cobj->bytecodes+arg);
 				#endif
 				#if defined RUN
 				// _target is the address which BREAK_LOOP can use without dereference.
@@ -418,10 +382,7 @@ void interpret(struct codeObject *cobj)
 				loop_block->_type = opcode;
 				loop_block->_target = pc + arg;
 				loop_block->_level = stack_size(_stack);
-				opd_res = malloc(sizeof(struct const_ent));
-				opd_res->_type = 'B';
-				opd_res->_ptr = loop_block;
-				stack_push(opd_res, _loop_stack);
+				loop_stack_push(loop_block, _loop_stack);
 				#endif
 				break;
 			case CALL_FUNCTION:
@@ -456,83 +417,59 @@ int getArg(char *ptr)
 	return b1 | b2;
 }
 
-/* Generic stack */
-
-struct stack *stack_init(int stksz)
+/* int stack operation */
+int* stack_init(int stksz)
 {
-	struct stack *stk = malloc(sizeof(struct stack));
-	stk->top = -1;
-	stk->array = malloc(sizeof(struct const_ent*) * stksz);
-	return stk;
+	int *stk = calloc(sizeof(int), stksz);
 }
 
-void stack_push( struct const_ent *obg, struct stack *stk)
+void stack_push(int val, int *stk)
 {
-	if (stk->top == STACK_SIZ-1){
+	if (top == STACK_SIZ-1){
 		printf("Error: Stack is full\n");
 		exit(2);
 	}
-	stk->array[++(stk->top)] = obg;
+	stk[++top] = val;
 }
 
-struct const_ent *stack_pop(struct stack *stk)
+int stack_pop(int *stk)
 {
-	if (stk->top == -1){
+	if (top == -1){
 		printf("Error: Stack is empty\n");
 		exit(2);
 	}
-	return stk->array[(stk->top)--];
+	return stk[top--];
 }
 
-int stack_size(struct stack *stk)
+int stack_size(int *stk)
 {
-	return stk->top + 1;
+	return top + 1;
 }
 
-/* Generic Map */
-struct Map *map_init(int mapsz)
+/* loop_block stack operation */
+struct Block **loop_stack_init(int stksz)
 {
-	struct Map *map = malloc(sizeof(struct Map));
-	map->size = 0;
-	map->array = malloc(sizeof(struct map_ent*) * mapsz);
-	return map;
+	struct Block **stk = malloc(sizeof(struct Block *) * stksz);
 }
 
-int map_exist(struct const_ent *key, struct Map *map)
+void loop_stack_push(struct Block *val, struct Block **stk)
 {
-	for (int i = 0; i < map->size; i++)
-		if (strcmp(map->array[i]->key->_ptr, key->_ptr) == 0)
-			return i;
-	/* Doesn't find key */
-	return -1;
-}
-
-int map_put(struct const_ent *key, struct const_ent *val, struct Map *map)
-{
-	int i;
-
-	if (map->size == MAP_SIZ){
-		printf("Error: Map is full\n");
+	if (loop_stack_top == STACK_SIZ-1){
+		printf("Error: Loop_Stack is full\n");
 		exit(2);
 	}
-	if ((i = map_exist(key, map)) == -1) {
-		struct map_ent *map_ent_tmp = malloc(sizeof(struct map_ent));
-		map_ent_tmp->key = key;
-		map_ent_tmp->val = val;
-		map->array[(map->size)++] = map_ent_tmp;
-	} else 
-		map->array[i]->val = val;
-	return 0;
+	stk[++loop_stack_top] = val;
 }
 
-struct const_ent *map_get(struct const_ent *key, struct Map *map)
+struct Block *loop_stack_pop(struct Block **stk)
 {
-	int i;
-	if ((i = map_exist(key, map)) != -1)
-		return map->array[i]->val;
-	printf("Error: doesn't find key %s\n", (char*)key->_ptr);
-	exit(2);
+	if (loop_stack_top == -1){
+		printf("Error: Loop_Stack is empty\n");
+		exit(2);
+	}
+	return stk[loop_stack_top--];
 }
+
 
 
 char *get_code_object(struct codeObject *cobj, char *memptr)
@@ -641,19 +578,14 @@ char *get_code_object(struct codeObject *cobj, char *memptr)
 			case 't':
 				printf("got a 't'\n");
 				name_len = getInt(memptr);
-				cobj->names[i] = malloc(sizeof(struct const_ent));
-				cobj->names[i]->_type = 's';
-				cobj->names[i]->_ptr = calloc(name_len+1, 1);
-				memcpy(cobj->names[i]->_ptr, memptr+4, name_len);
-				_string_table[_string_table_top++] = cobj->names[i]->_ptr;
+				cobj->names[i].key = calloc(name_len+1, 1);
+				memcpy(cobj->names[i].key, memptr+4, name_len);
+				_string_table[_string_table_top++] = cobj->names[i].key;
 				memptr += (4 + name_len);
 				break;
 			case 'R':
 				printf("got a 'R', names[%d] is %s\n", i, _string_table[getInt(memptr)]);
-				name_len = getInt(memptr);
-				cobj->names[i] = malloc(sizeof(struct const_ent));
-				cobj->names[i]->_type = 's';
-				cobj->names[i]->_ptr = _string_table[getInt(memptr)];
+				cobj->names[i].key = _string_table[getInt(memptr)];
 				memptr += 4;
 				break;
 			default:
@@ -776,21 +708,21 @@ int getInt(char *src)
 // 	cst_table_sz = getInt(memptr); memptr += 4;
 // 	cobj->consts_sz = cst_table_sz;
 // 	for (int i = 0; i < cst_table_sz; i++) {
-// 		getTuple( *memptr++ , );
-// 		cobj->consts[i] = obg_ent_ptr;	
+// 		getTuple( *memptr++ );
 // 	}
 
-// getTuple(char tuple_type, ) {
+// getTuple(char tuple_type) {
 // 	/* Get constants table */
-// 	struct obg_ent *obg_ent_ptr = malloc(sizeof(struct obg_ent));
+// 	const_ent_ptr = malloc(sizeof(struct const_ent));
 // 	switch ( tuple_type ) {
 // 		case 'i':
 // 			#if defined BSTR
 // 			printf("got i\n");
 // 			#endif
-// 			obg_ent_ptr->_type = 'i';
-// 			obg_ent_ptr->_ptr = malloc(sizeof(int));
-// 			*((int *)(obg_ent_ptr->_ptr)) = getInt(memptr);
+// 			const_ent_ptr->_type = 'i';
+// 			const_ent_ptr->_ptr = malloc(sizeof(int));
+// 			*((int *)(const_ent_ptr->_ptr)) = getInt(memptr);
+// 			cobj->consts[i] = const_ent_ptr;
 // 			memptr += 4;
 // 			break;
 // 		case 't':
@@ -798,32 +730,34 @@ int getInt(char *src)
 // 			printf("got t\n");
 // 			#endif
 // 			name_len = getInt(memptr);
-// 			obg_ent_ptr->_type = 't';
-// 			obg_ent_ptr->_ptr = calloc(name_len+1, 1);
-// 			memcpy(obg_ent_ptr->_ptr, memptr+4, name_len);
-// 			_string_table[_string_table_top++] = (char *)(obg_ent_ptr->_ptr);
+// 			const_ent_ptr->_type = 't';
+// 			const_ent_ptr->_ptr = calloc(name_len+1, 1);
+// 			memcpy(const_ent_ptr->_ptr, memptr+4, name_len);
+// 			cobj->consts[i] = const_ent_ptr;
+// 			_string_table[_string_table_top++] = (char *)(const_ent_ptr->_ptr);
 // 			memptr += (4 + name_len);
 // 			break;
 // 		case 'N':
 // 			#if defined BSTR
 // 			printf("got N\n");
 // 			#endif
-// 			obg_ent_ptr->_type = 'N';
-// 			obg_ent_ptr->_ptr = malloc(sizeof(int));
-// 			*((int *)(obg_ent_ptr->_ptr)) = 0;
+// 			const_ent_ptr->_type = 'N';
+// 			const_ent_ptr->_ptr = malloc(sizeof(int));
+// 			*((int *)(const_ent_ptr->_ptr)) = 0;
+// 			cobj->consts[i] = const_ent_ptr;
 // 			break;
 // 		case 'c':
 // 			#if defined BSTR
 // 			printf("got c\n");
 // 			#endif
-// 			obg_ent_ptr->_type = 'c';
-// 			obg_ent_ptr->_ptr = malloc(sizeof(struct codeObject));
-// 			memptr = get_code_object(obg_ent_ptr->_ptr, memptr);
+// 			const_ent_ptr->_type = 'c';
+// 			const_ent_ptr->_ptr = malloc(sizeof(struct codeObject));
+// 			cobj->consts[i] = const_ent_ptr;
+// 			memptr = get_code_object(const_ent_ptr->_ptr, memptr);
 // 			break;
 // 		default:
 // 			printf("Error: constant type error:\n");
 // 			printf("Can't recognize char [%c]\n", *(memptr-1));
 // 			exit(2);
 // 	}
-// 	return obg_ent_ptr;
 // }
