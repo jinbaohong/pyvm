@@ -1,12 +1,13 @@
 a = 1
-
-def foo():
-	return 3 + 3
+print "hello world"
+def foo(a, b):
+	return a + b
 
 def bar():
-	return 4 + 5
+	print "hello in bar"
+	return a + 5
 
-print foo()
+print foo(3, 5)
 print bar()
 # a = 1
 # b = a + 1

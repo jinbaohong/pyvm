@@ -84,6 +84,7 @@ struct functionObject {
 	struct codeObject *_func_code;
 	char *_func_name;
 	unsigned int _flags;
+	struct Map *_globals; // Every function has its own globals, which is built when it was created.
 };
 
 int getInt(char *src);
@@ -100,7 +101,8 @@ int map_exist(struct const_ent *key, struct Map *map);
 int map_put(struct const_ent *key, struct const_ent *val, struct Map *map);
 struct const_ent *map_get(struct const_ent *key, struct Map *map);
 
-struct frameObject *frame_init_by_funcObj(struct functionObject *fobj);
+struct frameObject *frame_init_by_funcObj(struct functionObject *funobj, struct const_ent **args);
+struct frameObject *frame_init_by_codeObj(struct codeObject *cobj);
 unsigned char frame_get_opcode(struct frameObject *frObj);
 int frame_has_more_code(struct frameObject *frObj);
 int frame_get_op_arg(struct frameObject *frObj);

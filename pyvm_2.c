@@ -29,10 +29,12 @@ struct functionObject *func_init_by_codeObj(struct codeObject *cobj)
 /* frameObject's API */
 struct frameObject {
 	struct Map *_locals;
+	struct Map *_globals;
 	struct stack *_stack;
 	struct stack *_loop_stack;
 	struct const_ent **_consts;
 	struct const_ent **_names;
+	struct const_ent **_fast_locals; // Store args passed by caller.
 	struct codeObject *_cobj;
 	char *_pc;
 
@@ -40,11 +42,15 @@ struct frameObject {
 };
 
 struct frameObject *frame_init_by_codeObj(struct codeObject *cobj)
+/* Init by codeObj is only for the first frame creation.
+ * In other word, this appears only in interpret().
+ */
 {
 	struct frameObject *fobj;
 
 	fobj = malloc(sizeof(struct frameObject));
 	fobj->_locals = map_init(MAP_SIZ);
+	fobj->_globals = fobj->_locals; // In first frame, global doesn't make difference with local.
 	fobj->_stack = stack_init(STACK_SIZ);
 	fobj->_loop_stack = stack_init(STACK_SIZ);
 	fobj->_consts = cobj->consts;
@@ -55,18 +61,22 @@ struct frameObject *frame_init_by_codeObj(struct codeObject *cobj)
 	return fobj;
 }
 
-struct frameObject *frame_init_by_funcObj(struct functionObject *funobj)
+struct frameObject *frame_init_by_funcObj(struct functionObject *funobj, struct const_ent **args)
+/* Init by funcObj is for CALL_FUNCTION. */
 {
 	struct frameObject *frmobj;
 
 	frmobj = malloc(sizeof(struct frameObject));
 	frmobj->_locals = map_init(MAP_SIZ);
+	frmobj->_globals = funobj->_globals;
 	frmobj->_stack = stack_init(STACK_SIZ);
 	frmobj->_loop_stack = stack_init(STACK_SIZ);
 	frmobj->_consts = funobj->_func_code->consts;
 	frmobj->_names = funobj->_func_code->names;
 	frmobj->_cobj = funobj->_func_code;
 	frmobj->_pc = funobj->_func_code->bytecodes;
+
+	frmobj->_fast_locals = args;
 
 	return frmobj;
 }
@@ -178,14 +188,12 @@ void interpret(struct codeObject *cobj)
 {
 	struct frameObject *frame_now, *frame_tmp;
 	struct Block *loop_block;
-	struct const_ent *opd_1, *opd_2, *opd_res;
+	struct const_ent *opd_1, *opd_2, *opd_res, **args;
 	unsigned char opcode;
 	int arg;
 
 	frame_now = frame_init_by_codeObj(cobj);
 	frame_now->_last = NULL;
-
-	// _frame = frame_now;
 
 	while ( frame_has_more_code(frame_now) ) {
 		opcode = frame_get_opcode(frame_now);
@@ -242,6 +250,9 @@ void interpret(struct codeObject *cobj)
 						printf("%d", *(int*)(opd_1->_ptr));
 						break;
 					case 't':
+						printf("%s", (char*)opd_1->_ptr);\
+						break;
+					case 's':
 						printf("%s", (char*)opd_1->_ptr);
 				}
 				#endif
@@ -309,6 +320,7 @@ void interpret(struct codeObject *cobj)
 					case 'i':
 						printf("%3ld %-25s %d (%d)\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "LOAD_CONST", arg, *(int*)frame_now->_consts[arg]->_ptr);
 						break;
+					case 's':
 					case 't':
 						printf("%3ld %-25s %d (%s)\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "LOAD_CONST", arg, (char*)frame_now->_consts[arg]->_ptr);
 						break;
@@ -333,7 +345,14 @@ void interpret(struct codeObject *cobj)
 				printf("%3ld %-25s %d (%s)\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "LOAD_NAME", arg, (char*)frame_now->_names[arg]->_ptr);
 				#endif
 				#if defined RUN
-				stack_push(map_get(frame_now->_names[arg], frame_now->_locals), frame_now->_stack);
+				if (map_exist(frame_now->_names[arg], frame_now->_locals) != -1) {
+					stack_push(map_get(frame_now->_names[arg], frame_now->_locals), frame_now->_stack);
+					break;
+				} else if (map_exist(frame_now->_names[arg], frame_now->_globals) != -1) {
+					stack_push(map_get(frame_now->_names[arg], frame_now->_globals), frame_now->_stack);
+					break;
+				}
+				printf("Error: variable %s doesn't exist.\n", (char*)frame_now->_names[arg]->_ptr);
 				#endif
 				break;
 			case COMPARE_OP:
@@ -396,6 +415,18 @@ void interpret(struct codeObject *cobj)
 					frame_now->_pc = frame_now->_cobj->bytecodes + arg;
 				#endif
 				break;
+			case LOAD_GLOBAL:
+				#if defined BSTR
+				printf("%3ld %-25s %d (%s)\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "LOAD_GLOBAL", arg, (char*)frame_now->_names[arg]->_ptr);
+				#endif
+				#if defined RUN
+				if (map_exist(frame_now->_names[arg], frame_now->_globals) != -1) {
+					stack_push(map_get(frame_now->_names[arg], frame_now->_globals), frame_now->_stack);
+					break;
+				}
+				printf("Error: variable %s doesn't exist.\n", (char*)frame_now->_names[arg]->_ptr);
+				#endif
+				break;
 			case SETUP_LOOP:
 				#if defined BSTR
 				printf("%3ld %-25s %d (to %ld)\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "SETUP_LOOP", arg, frame_now->_pc - frame_now->_cobj->bytecodes + arg);
@@ -412,12 +443,24 @@ void interpret(struct codeObject *cobj)
 				stack_push(opd_res, frame_now->_loop_stack);
 				#endif
 				break;
+			case LOAD_FAST:
+				#if defined BSTR
+				printf("%3ld %-25s %d\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "LOAD_FAST", arg);
+				#endif
+				#if defined RUN
+				stack_push(frame_now->_fast_locals[arg], frame_now->_stack);
+				#endif
+				break;
 			case CALL_FUNCTION:
 				#if defined BSTR
 				printf("%3ld %-25s %d\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "CALL_FUNCTION", arg);
 				#endif
 				#if defined RUN
-				frame_tmp = frame_init_by_funcObj(stack_pop(frame_now->_stack)->_ptr);
+				// args is the pointer of arguments
+				args = malloc(sizeof(struct const_ent*) * arg);
+				while (arg-- > 0)
+					args[arg] = stack_pop(frame_now->_stack);
+				frame_tmp = frame_init_by_funcObj(stack_pop(frame_now->_stack)->_ptr, args);
 				frame_tmp->_last = frame_now;
 				frame_now = frame_tmp;
 				#endif
@@ -430,6 +473,7 @@ void interpret(struct codeObject *cobj)
 				opd_res = malloc(sizeof(struct const_ent));
 				opd_res->_type = 'f'; // functionObject
 				opd_res->_ptr = (void*)func_init_by_codeObj(stack_pop(frame_now->_stack)->_ptr);
+				((struct functionObject*)(opd_res->_ptr))->_globals = frame_now->_globals; // Store globals into funcObj
 				stack_push(opd_res, frame_now->_stack);
 				#endif
 				break;
@@ -585,6 +629,18 @@ char *get_code_object(struct codeObject *cobj, char *memptr)
 				memcpy(const_ent_ptr->_ptr, memptr+4, name_len);
 				cobj->consts[i] = const_ent_ptr;
 				_string_table[_string_table_top++] = (char *)(const_ent_ptr->_ptr);
+				memptr += (4 + name_len);
+				break;
+			case 's':
+				#if defined BSTR
+				printf("got s\n");
+				#endif
+				name_len = getInt(memptr);
+				const_ent_ptr = malloc(sizeof(struct const_ent));
+				const_ent_ptr->_type = 's';
+				const_ent_ptr->_ptr = calloc(name_len+1, 1);
+				memcpy(const_ent_ptr->_ptr, memptr+4, name_len);
+				cobj->consts[i] = const_ent_ptr;
 				memptr += (4 + name_len);
 				break;
 			case 'N':
