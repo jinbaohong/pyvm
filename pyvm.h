@@ -57,6 +57,8 @@ struct const_ent {
 	 */
 	char _type;
 	void *_ptr;
+	struct const_ent *(*_len)(struct const_ent*);
+	int (*_test)(int);
 };
 
 struct codeObject {
@@ -85,6 +87,10 @@ struct functionObject {
 	char *_func_name;
 	unsigned int _flags;
 	struct Map *_globals; // Every function has its own globals, which is built when it was created.
+	int _isNative; // is this function native ? 1 : 0
+
+	struct const_ent *(*_call)(struct const_ent **args);
+	// 'call' is a function pointer.
 };
 
 int getInt(char *src);
@@ -108,7 +114,11 @@ int frame_has_more_code(struct frameObject *frObj);
 int frame_get_op_arg(struct frameObject *frObj);
 
 struct functionObject *func_init_by_codeObj(struct codeObject *cobj);
+struct functionObject *func_init_native(struct const_ent*(*func)(struct const_ent **));
 
 struct Map *builtin_init();
+struct const_ent *new_Func(struct functionObject *fobj);
 struct const_ent *new_Int(int num);
 struct const_ent *new_String(char *string);
+struct const_ent *String_len(struct const_ent *ent);
+

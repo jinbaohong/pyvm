@@ -26,6 +26,39 @@ struct functionObject *func_init_by_codeObj(struct codeObject *cobj)
 	return funcObj;
 }
 
+struct functionObject *func_init_native(struct const_ent*(*func)(struct const_ent **))
+{
+	struct functionObject *funcObj;
+
+	funcObj = malloc(sizeof(struct functionObject));
+	funcObj->_func_code = NULL;
+	funcObj->_func_name = NULL;
+	funcObj->_flags = 0;
+	funcObj->_isNative = 1;
+	funcObj->_call = func;
+
+	return funcObj;
+}
+
+
+struct const_ent *new_Func(struct functionObject *fobj)
+{
+	struct const_ent *res;
+
+	res = malloc(sizeof(struct const_ent));
+	res->_type = 'f';
+	res->_ptr = fobj;
+
+	return res;
+}
+
+struct const_ent *func_call_len(struct const_ent **args)
+{
+	return args[0]->_len(args[0]);
+}
+
+
+
 /* frameObject's API */
 struct frameObject {
 	struct Map *_locals;
@@ -115,6 +148,7 @@ struct Map *builtin_init()
 	map_put(new_String("True"), new_Int(1), _builtins);
 	map_put(new_String("False"), new_Int(0), _builtins);
 	map_put(new_String("None"), new_Int(0), _builtins);
+	map_put(new_String("len"), new_Func(func_init_native(func_call_len)), _builtins);
 
 	return _builtins;
 }
@@ -138,10 +172,16 @@ struct const_ent *new_String(char *string)
 	res = malloc(sizeof(struct const_ent));
 	res->_type = 's';
 	res->_ptr = (void*)string; // Doesn't copy string.
+	res->_len = String_len;
 
 	return res;
 }
 
+
+struct const_ent *String_len(struct const_ent *ent)
+{
+	return new_Int(strlen((char*)(ent->_ptr)));
+}
 
 int main(int ac, char const *av[])
 {
@@ -224,6 +264,7 @@ int main(int ac, char const *av[])
 void interpret(struct codeObject *cobj)
 {
 	struct frameObject *frame_now, *frame_tmp;
+	struct functionObject *func_tmp;
 	struct Block *loop_block;
 	struct const_ent *opd_1, *opd_2, *opd_res, **args;
 	struct Map *_builtins;
@@ -347,10 +388,11 @@ void interpret(struct codeObject *cobj)
 				printf("%3ld %-25s %d (%s)\n\n", frame_now->_pc - 3 - frame_now->_cobj->bytecodes, "STORE_NAME", arg, (char*)frame_now->_names[arg]->_ptr);
 				#endif
 				#if defined RUN
-				opd_res = malloc(sizeof(struct const_ent));
-				opd_res->_type = 's';
-				opd_res->_ptr = calloc(strlen((char*)frame_now->_names[arg]->_ptr)+1, 1);
-				strcpy(opd_res->_ptr, frame_now->_names[arg]->_ptr);
+				opd_res = new_String((char*)frame_now->_names[arg]->_ptr);
+				// opd_res = malloc(sizeof(struct const_ent));
+				// opd_res->_type = 's';
+				// opd_res->_ptr = calloc(strlen((char*)frame_now->_names[arg]->_ptr)+1, 1);
+				// strcpy(opd_res->_ptr, frame_now->_names[arg]->_ptr);
 				map_put(opd_res, stack_pop(frame_now->_stack), frame_now->_locals);
 				#endif
 				break;
@@ -503,9 +545,15 @@ void interpret(struct codeObject *cobj)
 				args = malloc(sizeof(struct const_ent*) * arg);
 				while (arg-- > 0)
 					args[arg] = stack_pop(frame_now->_stack);
-				frame_tmp = frame_init_by_funcObj(stack_pop(frame_now->_stack)->_ptr, args);
-				frame_tmp->_last = frame_now;
-				frame_now = frame_tmp;
+
+				func_tmp = (struct functionObject*)stack_pop(frame_now->_stack)->_ptr; // functionObject
+				if (func_tmp->_isNative) {
+					stack_push(func_tmp->_call(args), frame_now->_stack);
+				} else {
+					frame_tmp = frame_init_by_funcObj(func_tmp, args);
+					frame_tmp->_last = frame_now;
+					frame_now = frame_tmp;
+				}
 				#endif
 				break;
 			case MAKE_FUNCTION:
@@ -665,12 +713,13 @@ char *get_code_object(struct codeObject *cobj, char *memptr)
 				#if defined BSTR
 				printf("got t\n");
 				#endif
+				/*This is not a good idea */
 				name_len = getInt(memptr);
 				const_ent_ptr = malloc(sizeof(struct const_ent));
-				const_ent_ptr->_type = 't';
 				const_ent_ptr->_ptr = calloc(name_len+1, 1);
 				memcpy(const_ent_ptr->_ptr, memptr+4, name_len);
-				cobj->consts[i] = const_ent_ptr;
+				/* and should be modified */
+				cobj->consts[i] = new_String(const_ent_ptr->_ptr);
 				_string_table[_string_table_top++] = (char *)(const_ent_ptr->_ptr);
 				memptr += (4 + name_len);
 				break;
@@ -680,10 +729,10 @@ char *get_code_object(struct codeObject *cobj, char *memptr)
 				#endif
 				name_len = getInt(memptr);
 				const_ent_ptr = malloc(sizeof(struct const_ent));
-				const_ent_ptr->_type = 's';
 				const_ent_ptr->_ptr = calloc(name_len+1, 1);
 				memcpy(const_ent_ptr->_ptr, memptr+4, name_len);
-				cobj->consts[i] = const_ent_ptr;
+				/* and should be modified */
+				cobj->consts[i] = new_String(const_ent_ptr->_ptr);
 				memptr += (4 + name_len);
 				break;
 			case 'N':

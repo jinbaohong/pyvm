@@ -1,5 +1,4 @@
 a = 1
-print "hello world"
 def foo(a, b):
 	return a + b
 
@@ -15,7 +14,8 @@ if False:
 	print "It's False."
 False = 1
 if False:
-	print "False become True"
+	print "False has been changed"
+	print len("False become True")
 
 # a = 1
 # b = a + 1
