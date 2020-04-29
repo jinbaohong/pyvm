@@ -108,3 +108,7 @@ int frame_has_more_code(struct frameObject *frObj);
 int frame_get_op_arg(struct frameObject *frObj);
 
 struct functionObject *func_init_by_codeObj(struct codeObject *cobj);
+
+struct Map *builtin_init();
+struct const_ent *new_Int(int num);
+struct const_ent *new_String(char *string);

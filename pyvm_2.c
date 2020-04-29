@@ -106,6 +106,43 @@ int frame_get_op_arg(struct frameObject *frObj)
 	return b1 | b2;
 }
 
+struct Map *builtin_init()
+{
+	struct Map *_builtins;
+	struct const_ent *key, *val;
+
+	_builtins = map_init(MAP_SIZ);
+	map_put(new_String("True"), new_Int(1), _builtins);
+	map_put(new_String("False"), new_Int(0), _builtins);
+	map_put(new_String("None"), new_Int(0), _builtins);
+
+	return _builtins;
+}
+
+struct const_ent *new_Int(int num)
+{
+	struct const_ent *res;
+
+	res = malloc(sizeof(struct const_ent));
+	res->_type = 'i';
+	res->_ptr = malloc(sizeof(int));
+	*(int*)res->_ptr = num;
+
+	return res;
+}
+
+struct const_ent *new_String(char *string)
+{
+	struct const_ent *res;
+
+	res = malloc(sizeof(struct const_ent));
+	res->_type = 's';
+	res->_ptr = (void*)string; // Doesn't copy string.
+
+	return res;
+}
+
+
 int main(int ac, char const *av[])
 {
 	int fd, size;
@@ -189,8 +226,11 @@ void interpret(struct codeObject *cobj)
 	struct frameObject *frame_now, *frame_tmp;
 	struct Block *loop_block;
 	struct const_ent *opd_1, *opd_2, *opd_res, **args;
+	struct Map *_builtins;
 	unsigned char opcode;
 	int arg;
+
+	_builtins = builtin_init();
 
 	frame_now = frame_init_by_codeObj(cobj);
 	frame_now->_last = NULL;
@@ -350,6 +390,9 @@ void interpret(struct codeObject *cobj)
 					break;
 				} else if (map_exist(frame_now->_names[arg], frame_now->_globals) != -1) {
 					stack_push(map_get(frame_now->_names[arg], frame_now->_globals), frame_now->_stack);
+					break;
+				} else if (map_exist(frame_now->_names[arg], _builtins) != -1) {
+					stack_push(map_get(frame_now->_names[arg], _builtins), frame_now->_stack);
 					break;
 				}
 				printf("Error: variable %s doesn't exist.\n", (char*)frame_now->_names[arg]->_ptr);
